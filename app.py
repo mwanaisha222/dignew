@@ -1,4 +1,6 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, field_validator
 from typing import Optional
 import pandas as pd
@@ -8,14 +10,47 @@ from engine.predictor import AMRPredictor
 from engine.recommender import AntibioticRecommender
 from engine.rules import ClinicalRules
 from engine.valid_values import (
-    VALID_FAMILY, VALID_COUNTRY, VALID_AGE_GROUP, VALID_SOURCE,
-    VALID_PHENOTYPE, VALID_DATASET, MIN_YEAR, MAX_YEAR,
+    VALID_FAMILY,
+    VALID_COUNTRY,
+    VALID_AGE_GROUP,
+    VALID_SOURCE,
+    VALID_PHENOTYPE,
+    VALID_DATASET,
+    MIN_YEAR,
+    MAX_YEAR,
 )
 
 # ------------------------
 # Initialize App
 # ------------------------
 app = FastAPI(title="AMR Clinical Decision Support API")
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Return human-readable validation errors."""
+    field_errors = {}
+    for err in exc.errors():
+        # loc is e.g. ('body', 'species') or ('body', 'year')
+        loc = err.get("loc", ())
+        field = loc[-1] if loc else "unknown"
+        msg = err.get("msg", "Invalid value")
+        # Strip the "Value error, " prefix pydantic adds
+        if msg.startswith("Value error, "):
+            msg = msg[len("Value error, ") :]
+        field_errors[str(field)] = msg
+
+    # Build a single summary sentence
+    summary = "; ".join(f"{f}: {m}" for f, m in field_errors.items())
+
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": f"Invalid input — {summary}",
+            "field_errors": field_errors,
+        },
+    )
+
 
 # ------------------------
 # Load Production Artifacts
@@ -33,17 +68,13 @@ VALID_SPECIES = set(sorted(model.booster_.pandas_categorical[0]))
 # Initialize Engine
 # ------------------------
 predictor = AMRPredictor(
-    model=model,
-    threshold=threshold,
-    feature_columns=feature_columns,
-    cat_cols=cat_cols
+    model=model, threshold=threshold, feature_columns=feature_columns, cat_cols=cat_cols
 )
 
 recommender = AntibioticRecommender(predictor, antibiotics)
 
-rules = ClinicalRules(
-    reserve_drugs=["Meropenem"]
-)
+rules = ClinicalRules(reserve_drugs=["Meropenem"])
+
 
 # ------------------------
 # Patient Input Schema
@@ -63,7 +94,9 @@ class PatientInput(BaseModel):
     @classmethod
     def validate_species(cls, v):
         if v not in VALID_SPECIES:
-            raise ValueError(f"Unknown species '{v}'. Must be a recognised bacterial species.")
+            raise ValueError(
+                f"Unknown species '{v}'. Must be a recognised bacterial species."
+            )
         return v
 
     @field_validator("family")
@@ -84,31 +117,45 @@ class PatientInput(BaseModel):
     @classmethod
     def validate_age_group(cls, v):
         if v not in VALID_AGE_GROUP:
-            raise ValueError(f"Unknown age_group '{v}'. Must be one of: {VALID_AGE_GROUP}")
+            raise ValueError(
+                f"Unknown age_group '{v}'. Must be one of: {VALID_AGE_GROUP}"
+            )
         return v
 
     @field_validator("source")
     @classmethod
     def validate_source(cls, v):
         if v not in VALID_SOURCE:
-            raise ValueError(f"Unknown source '{v}'. Must be a recognised specimen source.")
+            raise ValueError(
+                f"Unknown source '{v}'. Must be a recognised specimen source."
+            )
         return v
 
     @field_validator("year")
     @classmethod
     def validate_year(cls, v):
         if not (MIN_YEAR <= v <= MAX_YEAR):
-            raise ValueError(f"Year must be between {MIN_YEAR} and {MAX_YEAR}, got {v}.")
+            raise ValueError(
+                f"Year must be between {MIN_YEAR} and {MAX_YEAR}, got {v}."
+            )
         return v
 
     @field_validator("phenotype")
     @classmethod
     def validate_phenotype(cls, v):
-        if v is None:
+        if v is None or v == "":
             return "unknown"
         if v not in VALID_PHENOTYPE:
-            raise ValueError(f"Unknown phenotype '{v}'. Must be one of: {VALID_PHENOTYPE}")
+            raise ValueError(
+                f"Unknown phenotype '{v}'. Must be one of: {VALID_PHENOTYPE}"
+            )
         return v
+
+    @field_validator("in_out_patient")
+    @classmethod
+    def validate_in_out_patient(cls, v):
+        # Model only knows "unknown" — map any value to it
+        return "unknown"
 
     @field_validator("dataset")
     @classmethod
@@ -135,6 +182,19 @@ def recommend_antibiotics(patient: PatientInput):
     # Apply clinical rules
     df = rules.apply(df)
 
+    return {"recommendations": df.to_dict(orient="records")}
+
+
+@app.get("/valid-options")
+def get_valid_options():
+    """Return all valid dropdown values so the frontend can populate selects."""
     return {
-        "recommendations": df.to_dict(orient="records")
+        "species": sorted(VALID_SPECIES),
+        "family": VALID_FAMILY,
+        "country": VALID_COUNTRY,
+        "age_group": VALID_AGE_GROUP,
+        "source": VALID_SOURCE,
+        "phenotype": VALID_PHENOTYPE,
+        "dataset": VALID_DATASET,
+        "year_range": {"min": MIN_YEAR, "max": MAX_YEAR},
     }
