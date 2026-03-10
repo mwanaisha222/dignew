@@ -2,14 +2,22 @@ import pandas as pd
 
 class AntibioticRecommender:
 
-    def __init__(self, predictor, antibiotic_list):
+    def __init__(self, predictor, antibiotic_list, species_antibiotic_map=None):
         self.predictor = predictor
         self.antibiotics = antibiotic_list
+        self.species_antibiotic_map = species_antibiotic_map or {}
 
-    def recommend(self, patient_row):
+    def recommend(self, patient_row, species=None):
         results = []
 
-        for abx in self.antibiotics:
+        # Filter antibiotics to only those valid for this species
+        if species and species in self.species_antibiotic_map:
+            valid_set = set(self.species_antibiotic_map[species])
+            valid_abx = [a for a in self.antibiotics if a in valid_set]
+        else:
+            valid_abx = self.antibiotics
+
+        for abx in valid_abx:
             temp = patient_row.copy()
             temp["antibiotic"] = abx
 

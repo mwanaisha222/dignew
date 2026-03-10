@@ -5,6 +5,7 @@ from pydantic import BaseModel, field_validator
 from typing import Optional
 import pandas as pd
 import joblib
+import json
 
 from engine.predictor import AMRPredictor
 from engine.recommender import AntibioticRecommender
@@ -64,6 +65,10 @@ cat_cols = joblib.load("models/cat_cols.pkl")
 # Extract valid species from the trained model (362 values — too many to hardcode)
 VALID_SPECIES = set(sorted(model.booster_.pandas_categorical[0]))
 
+# Load species-to-antibiotic mapping
+with open("species_antibiotic_map_readable.json") as f:
+    species_antibiotic_map = json.load(f)
+
 # ------------------------
 # Initialize Engine
 # ------------------------
@@ -71,7 +76,7 @@ predictor = AMRPredictor(
     model=model, threshold=threshold, feature_columns=feature_columns, cat_cols=cat_cols
 )
 
-recommender = AntibioticRecommender(predictor, antibiotics)
+recommender = AntibioticRecommender(predictor, antibiotics, species_antibiotic_map)
 
 rules = ClinicalRules(reserve_drugs=["Meropenem"])
 
@@ -177,7 +182,7 @@ def recommend_antibiotics(patient: PatientInput):
     patient_df = pd.DataFrame([patient_dict])
 
     # Generate ranked recommendations
-    df = recommender.recommend(patient_df)
+    df = recommender.recommend(patient_df, species=patient.species)
 
     # Apply clinical rules
     df = rules.apply(df)
